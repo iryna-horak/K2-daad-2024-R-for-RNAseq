@@ -1,0 +1,475 @@
+### Bioconductor and CRAN libraries used
+library(tidyverse)
+library(readr)
+library(tidyr)
+library(stringr)
+# install.packages("BiocManager")
+# BiocManager::install("AnnotationHub")
+library(AnnotationHub) # bioc
+library(ensembldb) # bioc
+library(RColorBrewer)
+library(DESeq2) # bioc
+library(pheatmap) # R
+library(DEGreport) # bioc
+library(ggplot2) 
+library(ggrepel) #r
+library(ggplotify)#r
+library(clusterProfiler) #bioc
+library(dplyr)
+library(tibble)
+library(EnhancedVolcano)
+library(plotly)
+library(data.table)
+# install.packages("gprofiler2")
+library(gprofiler2)
+# install.packages("enrichR")
+library(enrichR)
+library(biomaRt)
+library(stats)
+library(enrichplot)
+library(europepmc)
+library(janitor)
+# BiocManager::install("org.Hs.eg.db") #mouse - org.Mm.eg.db
+library(org.Hs.eg.db)
+
+setwd("C:/Genomics-UA_R/Target")
+getwd()
+
+
+# loading counts
+counts<- read.table("C:/Genomics-UA_R/Target/counts.csv", 
+                        header = T, 
+                        row.names = 1,
+                        sep = "\t")
+# transformed counts (log2(count+1)) >>> non-transformed
+counts <- (2^counts) - 1
+# remove last 5 rows w/o gene expression 
+counts <- counts[1:60483, ]
+samples <- colnames(counts) 
+samples <- substr(samples, 11, 16) 
+colnames(counts) <- samples
+rownames(counts) <- substr(rownames(counts), 1, 15)
+counts_t <- t(counts) %>% as.data.frame()
+
+
+# loading metadata
+clinical <- read.csv ("C:/Genomics-UA_R/Target/clinical all.csv", 
+                        header = T,
+                      sep = "\t")
+colnames(clinical) <- clinical[1, ]
+clinical <- clinical[2:1350, ] 
+clinical$case_submitter_id <- substr(clinical$case_submitter_id, 11, 16)
+clinical <- clinical[!duplicated(clinical), ] #removed only 1 row
+clinical <- distinct(clinical)
+metadata <- filter(clinical, clinical$metastasis_at_diagnosis %in% c("No Metastasis", "Metastasis, NOS"))
+samples <- as.data.frame(samples)
+metadata <- left_join(samples, metadata, by = c("samples" = "case_submitter_id")) %>% drop_na()
+metadata <- select(metadata, samples, metastasis_at_diagnosis, age_at_index, gender)
+metadata <- distinct(metadata) # 87 samples left
+
+metadata$age_at_index <- as.numeric(metadata$age_at_index)
+is.numeric(metadata$age_at_index)
+
+ggplot(metadata, aes(x = age_at_index)) +
+  geom_histogram(fill = "deepskyblue4", col = "grey", binwidth = 1) +
+  labs(title = "Розподіл пацієнтів за віком") +
+  theme_minimal() + 
+  facet_wrap(~gender)
+
+ggplot(metadata, aes(x = age_at_index)) +
+  geom_histogram(fill = "deepskyblue4", col = "grey", binwidth = 1) +
+  labs(title = "Розподіл пацієнтів за віком") +
+  theme_minimal() 
+
+ggplot(metadata, aes(x = age_at_index)) +
+  geom_histogram(fill = "deepskyblue4", col = "grey", binwidth = 1) +
+  labs(title = "Розподіл пацієнтів за віком") +
+  theme_minimal() + 
+  facet_wrap(~metastasis_at_diagnosis)
+
+median(metadata$age_at_index)
+length(which(metadata$gender == "female"))
+length(which(metadata$gender == "male"))
+
+
+
+# PCA
+counts_t2 <- counts_t[ , which(apply(counts_t, 2, var) != 0)] # removes zero variation
+counts_t2_merged <- counts_t2
+counts_t2_merged$samples <- row.names(counts_t2_merged)
+counts_t2_merged <- left_join(metadata, counts_t2_merged)
+row.names(counts_t2_merged) <- counts_t2_merged$samples
+counts_t3 <- counts_t2_merged[, 5:58020]
+counts_t3 <- counts_t3[ , which(apply(counts_t3, 2, var) != 0)]
+
+pca <- prcomp(counts_t3, scale=TRUE) 
+summary(pca)
+view(pca$x)
+PC1 <- pca$x[,1] #0.1502
+PC2 <- pca$x[,2] #0.1192
+
+ggplot(data = counts_t2_merged, aes(x = PC1, y = PC2)) +
+  geom_point(aes(col=metastasis_at_diagnosis, shape = gender)) + 
+  theme_minimal() +
+  labs(title = "PCA аналіз")
+?filter
+counts_t_filtered <- filter(counts_t2_merged, !(counts_t2_merged$samples %in% c("0A4I8U", "0A4I3S", "PATUXZ", "0A4HLD", "PAPNVD")))
+counts_t_filtered2 <- counts_t_filtered[, 5:58020]  
+counts_t_filtered2 <- counts_t_filtered2[ , which(apply(counts_t_filtered2, 2, var) != 0)]
+
+pca2 <- prcomp(counts_t_filtered2, scale=TRUE) 
+summary(pca2)
+view(pca$x)
+PC1_2 <- pca2$x[,1] #0.1189
+PC2_2 <- pca2$x[,2] #0.04655
+
+ggplot(data = counts_t_filtered, aes(x = PC1_2, y = PC2_2)) +
+  geom_point(aes(col=metastasis_at_diagnosis, shape = gender)) + 
+  theme_minimal() +
+  labs(title = "PCA аналіз")
+
+
+
+# анотації генів 
+# Connect to AnnotationHub
+ah <- AnnotationHub()
+# Query AnnotationHub
+hs_ens <- query(ah, c("Homo Sapiens", "EnsDb"))
+hs_ens
+hs_ens <- hs_ens[["AH116860"]]
+# Extract gene-level information
+txdb <- transcripts(hs_ens,
+                    return.type = "data.frame") %>% 
+  dplyr::select(tx_id, gene_id)  
+
+genedb <- genes(hs_ens, 
+                return.type = "data.frame") %>% 
+  dplyr::select(gene_id, gene_name, symbol)  
+
+gene_symbol <- genedb %>% dplyr::select(gene_id, symbol)
+write_tsv(gene_symbol, "gene_symbol_hs.tsv")
+
+hsdb <- inner_join(txdb, genedb)
+write.table(hsdb, 
+            file = "annotation_file.tsv", 
+            sep = "\t", 
+            row.names = F, 
+            quote = F)
+
+tx2gene <- hsdb[, c("tx_id", "gene_id")]
+
+
+
+## DESeq2 
+
+counts_deseq <- t(counts_t3) %>% round()
+dds <- DESeqDataSetFromMatrix(countData = counts_deseq, 
+                              colData = metadata, 
+                              design = ~metastasis_at_diagnosis)
+dds <- DESeq(dds)
+dds
+saveRDS(dds, "dds.rds")
+
+rld <- vst(dds) # vst normalization
+saveRDS(rld, "rld.rds")
+
+contrast <- c("metastasis_at_diagnosis", "Metastasis, NOS", "No Metastasis")
+dds_mets <- DESeq(dds)
+?results
+res_mets <- results(dds_mets, contrast = contrast, alpha = 0.05)
+length(which(res_mets$padj < 0.05)) # returns number of significant genes
+length(which(res_mets$log2FoldChange > 1 & res_mets$padj < 0.05))
+length(which(res_mets$log2FoldChange < -1 & res_mets$padj < 0.05))
+
+# table of DE results
+res_tb <- res_mets %>%
+  data.frame() %>% 
+  rownames_to_column(var = "gene") %>% 
+  as_tibble() %>% 
+  left_join(gene_symbol, by = c("gene" = "gene_id"))
+res_tb$gene_symbol <- ifelse(res_tb$symbol %in% c("", NA), res_tb$gene, res_tb$symbol)
+write.csv(res_tb, "results.csv")
+
+# table of significant DE results
+?filter
+res_sig <- filter(res_tb, padj<0.05)
+write.csv(res_sig, "results_significant.csv")
+
+
+
+#volcanoplot
+res_tb1 <- res_tb %>% drop_na(padj) %>% as.data.frame()
+res_tb1$log2FoldChange <- as.numeric(res_tb1$log2FoldChange)
+res_tb1$padj <- as.numeric(res_tb1$padj)
+EnhancedVolcano(res_tb1,
+                lab = res_tb1$gene_symbol,
+                x = "log2FoldChange",
+                y = "padj",
+                title = "Mets vs No Mets",
+                pCutoff = 0.05,
+                FCcutoff = 1) +
+  theme_minimal()
+
+?EnhancedVolcano
+
+# volcano plot in ggplot
+res_tb$log2FoldChange <- as.numeric(res_tb$log2FoldChange)
+res_tb$padj <- as.numeric(res_tb$padj)
+res_tb$significance <- fcase(
+  res_tb$log2FoldChange > 1 & res_tb$padj < 0.05, "UP",
+  res_tb$log2FoldChange < -1 & res_tb$padj < 0.05, "DOWN",
+  default = "NO")
+
+volcano1 <- ggplot(data = res_tb, aes(x=log2FoldChange, 
+                                      y=-log10(padj), 
+                                      col = significance, 
+                                      label = gene_symbol)) +
+  geom_point() +
+  theme_minimal() +
+  scale_color_manual(values = c("blue", "black", "maroon")) + 
+  labs(title = "Mets vs No Mets") +
+  geom_text_repel() +
+  geom_vline(xintercept = c(-1, 1), col = "black") +
+  geom_hline(yintercept = -log10(0.05), col = "black")
+
+ggplotly(volcano1)
+
+ggsave("volcanoplot.jpg")
+
+
+
+# heatmap of normalized data
+vsd <- vst(dds_mets)
+head(assay(vsd), 3)  
+normalized <- assay(vsd) %>% as.data.frame()
+write.csv(normalized, "normalized_counts.csv") 
+
+res_sig$log2FoldChange <- as.numeric(res_sig$log2FoldChange)
+norm_top <- res_sig[order(res_sig$log2FoldChange, decreasing = T), ]
+norm_top <- norm_top[1:20, ]
+norm_top_decs <- res_sig[order(res_sig$log2FoldChange, decreasing = F), ]
+norm_top[21:40, ] <- norm_top_decs[1:20, ]
+normalized$gene <- row.names(normalized)
+norm_top <- left_join(norm_top, normalized)
+row.names(norm_top) <- norm_top$gene_symbol
+hm <- norm_top[, 10:96] %>% as.matrix()
+row.names(hm) <- rownames(norm_top)
+col_names <- colnames(hm) %>% as.data.frame()
+col_names <- left_join(col_names, metadata, by = c("." = "samples"))
+row.names(col_names) <- col_names$.
+metastasis <- metadata$metastasis_at_diagnosis %>% as.data.frame()
+row.names(metastasis) <- rownames(metadata)
+metastasis$samples <- rownames(metastasis)
+metastasis <- left_join(col_names, metastasis, by = c("." = "samples"))
+metastasis <- metastasis[ ,1:2] %>% as.data.frame()
+metastasis <- rename(metastasis, "Metastasis" = ".")
+row.names(metastasis) <- col_names$.
+metastasis <- arrange(metastasis, metastasis_at_diagnosis)
+hm_t <- t(hm) %>% as.data.frame()
+hm_t$samples <- row.names(hm_t)
+hm_t <- left_join(metastasis, hm_t, by = c("Metastasis" = "samples"))  
+row.names(hm_t) <- hm_t$Metastasis
+hm_t <- hm_t[ , 3:42]
+hm <- t(hm_t) %>% as.data.frame()
+metastasis <- as.data.frame(metastasis$metastasis_at_diagnosis)
+metastasis <- rename(metastasis, "Metastasis" = "metastasis$metastasis_at_diagnosis")
+row.names(metastasis) <- row.names(hm_t)
+
+?pheatmap
+pheatmap(hm,
+         color = colorRampPalette(c("gold2", "white","blue"))(100),
+         main = "Top-20 upregulated and top-20 downregulated genes",
+         show_colnames = T,
+         cluster_cols = F,
+         cluster_rows = T,
+         border_color = F,
+         scale = 'row',
+         #labels_row = row.names(hm),
+         annotation_col = metastasis,
+         #labels_col = col_names$.,
+         angle_col = 90,
+         fontsize_col = 8,
+         fontsize_row =  10,
+         fontsize = 12)
+
+
+# functional analysis
+
+# enrichR
+# https://cran.r-project.org/web/packages/enrichR/vignettes/enrichR.html
+
+dbs <- listEnrichrDbs()
+dbs <- c("KEGG_2021_Human",
+         "WikiPathway_2023_Human",
+         "Elsevier_Pathway_Collection",
+         "GO_Biological_Process_2023")
+dbs
+res_tb_upreg <- res_tb %>% filter(padj < 0.05) %>%
+  filter(log2FoldChange > 1) %>%
+  arrange(-log2FoldChange)
+res_tb_downreg <- res_tb %>% filter(padj < 0.05) %>%
+  filter(log2FoldChange < -1) %>%
+  arrange(log2FoldChange)
+
+enrich_genes_upreg <- c(res_tb_upreg$gene_symbol[res_tb_upreg$symbol != ""])
+enrich_genes_downreg <- c(res_tb_downreg$gene_symbol[res_tb_downreg$symbol != ""])
+
+enriched_up <- enrichr(enrich_genes_upreg, dbs)
+enriched_down <- enrichr(enrich_genes_downreg, dbs)
+ 
+view(enriched_down$GO_Biological_Process_2023)
+
+
+# gprofiler
+# install.packages("gprofiler2")
+library(gprofiler2)
+?gost
+gost_res_up <- gost(query = enriched_up,organism = "hsapiens",
+                ordered_query = TRUE)
+gost_res_downreg <- gost(query = enriched_down,organism = "hsapiens",
+                        ordered_query = TRUE)
+
+view(gost_res_up$result)
+view(gost_res_downreg$result)
+
+?gostplot
+g_up <- gostplot(gost_res_up, capped = FALSE, interactive = FALSE)
+g_up
+
+dbs_gobp <- listEnrichrDbs()
+dbs_gobp <- c("GO_Biological_Process_2023")
+up <- enrichr(enrich_genes_upreg, dbs_gobp)
+gost_up_gobp <- gost(query = up,organism = "hsapiens",
+                     ordered_query = TRUE)
+view(gost_up_gobp$result)
+go_bp_23_tb_up <- gost_up_gobp$result[c(6, 11, 38, 40, 85, 88, 90, 98, 102, 103), c(11, 9, 3)]
+gost_plot_up <- gostplot(gost_up_gobp, capped = FALSE, interactive = FALSE)
+gost_plot_up  
+gost_plot_up2 <- gostplot(gost_up_gobp, capped = F, interactive = T)
+gost_plot_up2
+
+down <- enrichr(enrich_genes_downreg, dbs_gobp)
+gost_down_gobp <- gost(query = down,organism = "hsapiens",
+                     ordered_query = TRUE)
+view(gost_down_gobp$result)
+go_bp_23_tb_down <- gost_down_gobp$result[c(23, 32, 46, 80:82), c(11, 9, 3)]
+gost_plot_down <- gostplot(gost_down_gobp, capped = FALSE, interactive = FALSE)
+gost_plot_down  
+gost_plot_down2 <- gostplot(gost_down_gobp, capped = F, interactive = T)
+gost_plot_down2
+
+
+
+# ranking-based enrichment
+?useEnsembl
+ensembl <- useEnsembl(biomart = "ensembl", 
+                      dataset = "hsapiens_gene_ensembl", 
+                      mirror = "useast")
+?sign
+res_tb1$pvalue <- as.numeric(res_tb1$pvalue)
+res_tb1_ranked <- res_tb1 %>% 
+  mutate(ranking = (sign(log2FoldChange) * (-log10(pvalue)))) %>% 
+  arrange(desc(ranking)) # %>% tibble::rownames_to_column("genes")
+
+?getBM
+genes_entrez <- getBM(filters = "external_gene_name",
+                      attributes = c("entrezgene_id", "external_gene_name"),
+                      values = res_tb1_ranked$gene_symbol,
+                      mart = ensembl)
+
+res_tb1_ranked <- dplyr::left_join(res_tb1_ranked, genes_entrez, by = c("gene_symbol" = "external_gene_name"))
+
+res_tb1_ranked %>% janitor::get_dupes("entrezgene_id")
+
+res_tb1_ranked <- res_tb1_ranked %>%
+  tidyr::drop_na() %>%
+  dplyr::distinct(entrezgene_id, .keep_all = TRUE)
+
+# GSEA - Gene set enrichment analysis
+genes_list <- res_tb1_ranked$ranking
+names(genes_list) <- res_tb1_ranked$entrezgene_id
+genes_list = sort(genes_list, decreasing = TRUE)
+
+?gseWP
+gseWP_res_01 <- gseWP(genes_list, organism = "Homo sapiens", by = "DOSE", 
+                       nPerm = 1000, pvalueCutoff = 0.1)
+gseWP_res_005 <- gseWP(genes_list, organism = "Homo sapiens", by = "DOSE", 
+                      nPerm = 1000, pvalueCutoff = 0.05)
+view(gseWP_res_01@result)
+
+gse_KEGG <- gseKEGG(genes_list, organism = "hsa", by = "DOSE", nPerm = 1000)
+view(gse_KEGG@result)
+
+?gseGO
+
+# Visualizations
+?dotplot
+dotplot(gseWP_res_01, showCategory=30, x = "NES", color = "NES", split = NULL,
+        font.size = 12) + 
+  ggtitle("GSEA wikiPathways, p<0.1")
+
+dotplot(gse_KEGG, showCategory=30, x = "NES", color = "NES", split = NULL,
+        font.size = 14) + 
+  ggtitle("GSEA KEGG pathways, p<0.05") # works with gsea objects
+
+# treeplot
+?setReadable
+?treeplot
+gseWP_res_01_genename <- setReadable(gseWP_res_01, 'org.Hs.eg.db', 'ENTREZID')
+wp <- pairwise_termsim(gseWP_res_01_genename)
+treeplot(wp) 
+gse_KEGG_genename <- setReadable(gse_KEGG, 'org.Hs.eg.db', 'ENTREZID')
+KEGG <- pairwise_termsim(gse_KEGG_genename)
+treeplot(KEGG)
+
+
+# pathview
+logFC <- res_tb1_ranked$log2FoldChange
+names(logFC) <- res_tb1_ranked$entrezgene_id
+
+?pathview
+library(pathview)
+view(gse_KEGG@result)
+view(enriched_up$KEGG_2021_Human)
+view(enriched_down$KEGG_2021_Human)
+
+pathview(gene.data = logFC, 
+         pathway.id = "04820", # KEGG pathway Cytoskeleton in muscle cells
+         species = "hsa", 
+         kegg.native = T) #picture downloaded to wd
+pathview(gene.data = logFC, 
+         pathway.id = "03030", # DNA replication
+         species = "hsa", 
+         kegg.native = T)
+pathview(gene.data = logFC, 
+         pathway.id = "04514", # Cell adhesion molecules 
+         species = "hsa", 
+         kegg.native = T)
+pathview(gene.data = logFC, 
+         pathway.id = "00190", # Oxidative phosphorylation
+         species = "hsa", 
+         kegg.native = T)
+pathview(gene.data = logFC, 
+         pathway.id = "04310", # WNT signaling pathway
+         species = "hsa", 
+         kegg.native = T)
+pathview(gene.data = logFC, 
+         pathway.id = "04550", # Signaling pathways regulating pluripotency of stem cells
+         species = "hsa", 
+         kegg.native = T)
+pathview(gene.data = logFC, 
+         pathway.id = "04151", # PI3K-AKT signaling pathway
+         species = "hsa", 
+         kegg.native = T)
+pathview(gene.data = logFC, 
+         pathway.id = "04010", # MAPK signaling pathway
+         species = "hsa", 
+         kegg.native = T)
+pathview(gene.data = logFC, 
+         pathway.id = "04210", # Apoptosis
+         species = "hsa", 
+         kegg.native = T)
+pathview(gene.data = logFC, 
+         pathway.id = "04115", # p53 signaling pathway
+         species = "hsa", 
+         kegg.native = T)
